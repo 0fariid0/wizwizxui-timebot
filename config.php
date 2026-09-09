@@ -18931,6 +18931,12 @@ function v2raystore_reportTopicEnabled($topicKey){
     return (($botState['storeReportTopicState_' . $topicKey] ?? 'on') === 'on');
 }
 
+function v2raystore_reportTopicAutoCreateEnabled($topicKey){
+    global $botState;
+    $topicKey = trim((string)$topicKey);
+    return $topicKey !== '' && (($botState['storeReportTopicAuto_' . $topicKey] ?? 'off') === 'on');
+}
+
 function v2raystore_reportTopicHasEnabledEvents($topicKey){
     $items = v2raystore_reportTopicItems();
     if(!isset($items[$topicKey])) return true;
@@ -18977,8 +18983,14 @@ function v2raystore_reportEnsureTopic($eventKey, $forceRebuild = false){
         v2raystore_saveReportTopicStore($topics);
     }
 
-    if(!$forceRebuild) return 0;
+    // حالت خودکار فقط با «لغو اتصال / خودکار» برای همان دسته فعال می‌شود؛
+    // حالت پیش‌فرض خاموش است تا ارسال گزارش باعث ساخت زنجیره‌ای تاپیک نشود.
+    if(!$forceRebuild && !v2raystore_reportTopicAutoCreateEnabled($topicKey)) return 0;
 
+    // وب‌هوک و کران ممکن است هم‌زمان اجرا شوند؛ قفل کوتاه‌مدت مانع ساخت
+    // هم‌زمان چند تاپیک برای یک دسته می‌شود.
+    $lock = @fopen(sys_get_temp_dir() . '/v2raystore_topic_' . md5((string)$chat . '|' . $topicKey) . '.lock', 'c');
+    if($lock && !@flock($lock, LOCK_EX | LOCK_NB)){ @fclose($lock); return 0; }
     $res = bot('createForumTopic', [
         'chat_id' => $chat,
         'name' => $title,
@@ -18988,9 +19000,11 @@ function v2raystore_reportEnsureTopic($eventKey, $forceRebuild = false){
         if($threadId > 0){
             $topics[$topicKey] = $threadId;
             v2raystore_saveReportTopicStore($topics);
+            if($lock){ @flock($lock, LOCK_UN); @fclose($lock); }
             return $threadId;
         }
     }
+    if($lock){ @flock($lock, LOCK_UN); @fclose($lock); }
     return 0;
 }
 
@@ -19023,6 +19037,7 @@ function v2raystore_reportUnlinkTopic($topicKey){
     if(!array_key_exists($topicKey, $topics)) return false;
     unset($topics[$topicKey]);
     v2raystore_saveReportTopicStore($topics);
+    setSettings('storeReportTopicAuto_' . $topicKey, 'on');
     return true;
 }
 
@@ -19895,7 +19910,8 @@ function v2raystore_getReportTopicManagementMenuText(){
     $lines = ["🧵 <b>مدیریت تاپیک‌های گزارش</b>", "", "تاپیک‌ها خودکار ساخته نمی‌شوند؛ از اینجا می‌توانی هرکدام را جداگانه تست یا حذف کنی.", ""];
     foreach(v2raystore_reportTopicItems() as $key=>$info){
         $id = intval($topics[$key] ?? 0);
-        $lines[] = ($id > 0 ? '✅' : '⚠️') . ' <b>' . v2raystore_h($info['title']) . '</b>' . ($id > 0 ? ' — شناسه <code>' . $id . '</code>' : ' — ثبت نشده');
+        $mode = v2raystore_reportTopicAutoCreateEnabled($key) ? 'خودکار' : 'دستی';
+        $lines[] = ($id > 0 ? '✅' : '⚠️') . ' <b>' . v2raystore_h($info['title']) . '</b>' . ($id > 0 ? ' — شناسه <code>' . $id . '</code> — ' . $mode : ' — ثبت نشده');
     }
     return implode("\n", $lines);
 }

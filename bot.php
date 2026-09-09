@@ -646,6 +646,7 @@ if(preg_match('/^manualReportTopic\|([a-z_]+)\|(-?\d+)\|(\d+)$/', $data ?? '', $
     $topics[$topicKey] = $threadId;
     setSettings('rewardChannel', $chatId);
     setSettings('storeReportTopicState_' . $topicKey, 'on');
+    setSettings('storeReportTopicAuto_' . $topicKey, 'off');
     v2raystore_saveReportTopicStore($topics);
     setUser();
     alert('تاپیک موجود با موفقیت ثبت شد. تاپیک جدیدی ساخته نشد.');
