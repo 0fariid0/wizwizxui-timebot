@@ -7748,7 +7748,7 @@ function v2raystore_isReceiptPhotoMessage($updateObj = null){
 function v2raystore_getReceiptFingerprints($fileId = ''){
     global $botToken;
     $fileId = trim((string)$fileId);
-    $empty = ['sha256'=>'', 'visual'=>''];
+    $empty = ['sha256'=>'', 'visual'=>'', 'visual_version'=>3];
     if($fileId === '' || trim((string)$botToken) === '' || !function_exists('curl_init')) return $empty;
     $fileInfo = @bot('getFile', ['file_id'=>$fileId, '_timeout'=>6]);
     $filePath = is_object($fileInfo) ? trim((string)($fileInfo->result->file_path ?? '')) : '';
@@ -7774,30 +7774,30 @@ function v2raystore_getReceiptFingerprints($fileId = ''){
     $size = @filesize($tmp);
     $hash = ($ok && $size !== false && $size > 0 && $size <= (15 * 1024 * 1024)) ? (string)@hash_file('sha256', $tmp) : '';
     $visual = '';
-    // dHash نسخه ۲ به لبه‌ها و نوشته‌های رسید (مبلغ، تاریخ و شماره پیگیری)
-    // حساس است؛ بنابراین رسیدهای متفاوت با قالب ثابت بانک، مشابه حساب نمی‌شوند.
+    // نسخهٔ ۳: dHash تمام تصویر برای رسیدهای قالب‌ثابت کافی نیست؛ چون نوشته‌های
+    // متغیر ممکن است در resize عمودی حذف شوند. اینجا ناحیهٔ اصلی رسید را با
+    // جزئیات بیشتر، به خاکستری و ۱۶ سطح روشنایی تبدیل می‌کنیم. خروجی فقط یک
+    // هش کوتاه در دیتابیس است و فایل موقت بلافاصله حذف می‌شود.
     if($hash !== '' && function_exists('imagecreatefromstring') && function_exists('imagecreatetruecolor')){
         $raw = @file_get_contents($tmp);
         $src = ($raw !== false) ? @imagecreatefromstring($raw) : false;
         if($src){
-            $small = @imagecreatetruecolor(33, 8);
+            $srcW = max(1, @imagesx($src));
+            $srcH = max(1, @imagesy($src));
+            // حاشیهٔ معمول اسکرین‌شات/پس‌زمینه حذف می‌شود، اما اگر تصویر کوچک
+            // بود همان کل تصویر بررسی می‌شود.
+            $cropX = intval($srcW * 0.06); $cropY = intval($srcH * 0.10);
+            $cropW = max(1, intval($srcW * 0.88)); $cropH = max(1, intval($srcH * 0.78));
+            $small = @imagecreatetruecolor(64, 64);
             if($small){
-                @imagecopyresampled($small, $src, 0, 0, 0, 0, 33, 8, @imagesx($src), @imagesy($src));
-                $bits = [];
-                for($y=0; $y<8; $y++){
-                    for($x=0; $x<32; $x++){
-                        $rgb1 = @imagecolorat($small, $x, $y);
-                        $rgb2 = @imagecolorat($small, $x + 1, $y);
-                        $g1 = (0.299 * (($rgb1 >> 16) & 255)) + (0.587 * (($rgb1 >> 8) & 255)) + (0.114 * ($rgb1 & 255));
-                        $g2 = (0.299 * (($rgb2 >> 16) & 255)) + (0.587 * (($rgb2 >> 8) & 255)) + (0.114 * ($rgb2 & 255));
-                        $bits[] = ($g1 > $g2) ? 1 : 0;
-                    }
+                @imagecopyresampled($small, $src, 0, 0, $cropX, $cropY, 64, 64, $cropW, $cropH);
+                $packed = '';
+                for($y=0; $y<64; $y++) for($x=0; $x<64; $x++){
+                    $rgb = @imagecolorat($small, $x, $y);
+                    $g = (0.299 * (($rgb >> 16) & 255)) + (0.587 * (($rgb >> 8) & 255)) + (0.114 * ($rgb & 255));
+                    $packed .= chr(max(0, min(15, intval($g / 16))));
                 }
-                for($i=0; $i<count($bits); $i+=4){
-                    $n = 0;
-                    for($j=0; $j<4; $j++) $n = ($n << 1) | intval($bits[$i+$j] ?? 0);
-                    $visual .= dechex($n);
-                }
+                $visual = hash('sha256', $packed);
                 @imagedestroy($small);
             }
             @imagedestroy($src);
@@ -7807,6 +7807,7 @@ function v2raystore_getReceiptFingerprints($fileId = ''){
     return [
         'sha256'=>preg_match('/^[a-f0-9]{64}$/i', $hash) ? strtolower($hash) : '',
         'visual'=>preg_match('/^[a-f0-9]{64}$/i', $visual) ? strtolower($visual) : '',
+        'visual_version'=>3,
     ];
 }
 
@@ -7828,7 +7829,8 @@ function v2raystore_receiptCheckSettings(){
     $days = intval($botState['receiptDuplicateRetentionDays'] ?? 90);
     if($days < 1) $days = 90;
     if($days > 3650) $days = 3650;
-    return ['enabled'=>$enabled, 'days'=>$days];
+    $reminders = (($botState['duplicateReceiptReminderState'] ?? 'off') === 'on');
+    return ['enabled'=>$enabled, 'days'=>$days, 'reminders'=>$reminders];
 }
 
 function v2raystore_receiptCheckMenuText(){
@@ -7836,6 +7838,7 @@ function v2raystore_receiptCheckMenuText(){
     return "🧾 <b>بررسی فیش‌های تکراری</b>\n\n" .
         "وضعیت بررسی: <b>" . ($s['enabled'] ? '🟢 روشن' : '🔴 خاموش') . "</b>\n" .
         "مدت نگهداری سوابق: <b>" . intval($s['days']) . " روز</b>\n\n" .
+        "یادآوری بررسی فیش: <b>" . ($s['reminders'] ? '🟢 روشن' : '🔴 خاموش') . "</b>\n\n" .
         "در حالت خاموش، رسید و سفارش بدون اختلال ثبت می‌شوند و فقط هشدار فیش تکراری ارسال نمی‌شود.\n" .
         "سوابق هر رسید، دقیقاً پس از سپری‌شدن مدت تعیین‌شده از تاریخ همان رسید حذف می‌شود.";
 }
@@ -7845,8 +7848,45 @@ function v2raystore_receiptCheckMenuKeys(){
     return json_encode(['inline_keyboard'=>[
         [['text'=>($s['enabled'] ? '🟢 بررسی روشن' : '🔴 بررسی خاموش'), 'callback_data'=>'toggleReceiptDuplicateCheck']],
         [['text'=>'📅 تغییر مدت نگهداری (' . intval($s['days']) . ' روز)', 'callback_data'=>'setReceiptRetentionDays']],
+        [['text'=>($s['reminders'] ? '🟢 یادآوری ساعتی روشن' : '🔴 یادآوری ساعتی خاموش'), 'callback_data'=>'toggleDuplicateReceiptReminders']],
         [['text'=>'⬅️ بازگشت به امکانات سرویس','callback_data'=>'botSettingsService']]
     ]], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+function v2raystore_markDuplicateReceiptPending($payHash, $chatId = 0, $messageId = 0){
+    global $connection;
+    $payHash = trim((string)$payHash); $chatId = intval($chatId); $messageId = intval($messageId);
+    if($payHash === '' || !isset($connection) || !$connection) return false;
+    if(function_exists('v2raystore_ensureAutoOrderColumns')) v2raystore_ensureAutoOrderColumns();
+    $stmt = @$connection->prepare("UPDATE `pays` SET `duplicate_receipt_pending`=1, `duplicate_receipt_ack_at`=0, `duplicate_receipt_last_reminder_at`=0, `duplicate_receipt_warning_chat_id`=?, `duplicate_receipt_warning_message_id`=? WHERE `hash_id`=?");
+    if(!$stmt) return false;
+    $stmt->bind_param('iis', $chatId, $messageId, $payHash); $ok = $stmt->execute(); $stmt->close(); return $ok;
+}
+
+function v2raystore_ackDuplicateReceipt($payHash){
+    global $connection;
+    $payHash = trim((string)$payHash); if($payHash === '' || !isset($connection) || !$connection) return false;
+    $stmt = @$connection->prepare("UPDATE `pays` SET `duplicate_receipt_pending`=0, `duplicate_receipt_ack_at`=? WHERE `hash_id`=?");
+    if(!$stmt) return false; $now=time(); $stmt->bind_param('is',$now,$payHash); $ok=$stmt->execute(); $stmt->close(); return $ok;
+}
+
+function v2raystore_processDuplicateReceiptReminders(){
+    global $connection;
+    $s = v2raystore_receiptCheckSettings();
+    if(empty($s['enabled']) || empty($s['reminders']) || !isset($connection) || !$connection) return 0;
+    if(function_exists('v2raystore_ensureAutoOrderColumns')) v2raystore_ensureAutoOrderColumns();
+    $now = time(); $sent = 0;
+    $res = @$connection->query("SELECT `hash_id`,`duplicate_receipt_warning_chat_id`,`duplicate_receipt_warning_message_id`,`duplicate_receipt_last_reminder_at` FROM `pays` WHERE `duplicate_receipt_pending`=1 AND COALESCE(`duplicate_receipt_ack_at`,0)=0 AND COALESCE(`duplicate_receipt_warning_chat_id`,0)<>0 AND COALESCE(`duplicate_receipt_warning_message_id`,0)>0 AND (`duplicate_receipt_last_reminder_at`=0 OR `duplicate_receipt_last_reminder_at` <= " . intval($now-3600) . ") ORDER BY `duplicate_receipt_last_reminder_at` ASC LIMIT 30");
+    if(!$res) return 0;
+    while($row=$res->fetch_assoc()){
+        $hash = trim((string)($row['hash_id']??'')); $chat=intval($row['duplicate_receipt_warning_chat_id']??0); $msg=intval($row['duplicate_receipt_warning_message_id']??0);
+        if($hash===''||$chat==0||$msg<=0) continue;
+        $r = sendMessage("⏰ <b>یادآوری بررسی فیش تکراری</b>\n🧾 کد پرداخت: <code>" . v2raystore_h($hash) . "</code>\nلطفاً پس از بررسی، دکمهٔ سبز تأیید را بزنید تا یادآوری متوقف شود.", json_encode(['inline_keyboard'=>[[['text'=>'✅ رسید بررسی و تأیید شد','callback_data'=>'ackDuplicateReceipt'.$hash,'style'=>'success']]]], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES), 'HTML', $chat, $msg);
+        if(is_object($r) && !empty($r->ok)){
+            $u=@$connection->prepare("UPDATE `pays` SET `duplicate_receipt_last_reminder_at`=? WHERE `hash_id`=?"); if($u){$u->bind_param('is',$now,$hash);$u->execute();$u->close();} $sent++;
+        }
+    }
+    return $sent;
 }
 
 function v2raystore_cleanupReceiptFingerprints($now = null){
@@ -7870,7 +7910,7 @@ function v2raystore_ensureReceiptFingerprintsTable(){
         `file_unique_id` varchar(191) NOT NULL,
         `content_hash` char(64) DEFAULT NULL,
         `visual_hash` char(64) DEFAULT NULL,
-        `visual_version` tinyint(3) NOT NULL DEFAULT 2,
+        `visual_version` tinyint(3) NOT NULL DEFAULT 3,
         `created_at` int(11) NOT NULL DEFAULT 0,
         PRIMARY KEY (`id`),
         KEY `idx_receipt_unique_id` (`file_unique_id`),
@@ -7929,7 +7969,7 @@ function v2raystore_registerReceiptFingerprint($payHash, $userId, $fileUniqueId 
         }
     }
     if(!$previous && $visualHash !== ''){
-        $stmt = @$connection->prepare("SELECT `pay_hash`,`user_id`,`created_at` FROM `receipt_fingerprints` WHERE `visual_hash` = ? AND `visual_version` = 2 AND `pay_hash` <> ? ORDER BY `id` ASC LIMIT 1");
+        $stmt = @$connection->prepare("SELECT `pay_hash`,`user_id`,`created_at` FROM `receipt_fingerprints` WHERE `visual_hash` = ? AND `visual_version` = 3 AND `pay_hash` <> ? ORDER BY `id` ASC LIMIT 1");
         if($stmt){
             $stmt->bind_param('ss', $visualHash, $payHash);
             $stmt->execute();
@@ -7945,7 +7985,7 @@ function v2raystore_registerReceiptFingerprint($payHash, $userId, $fileUniqueId 
     if($contentHash !== '') $matchQueries[] = ['content_hash', $contentHash];
     if($visualHash !== '') $matchQueries[] = ['visual_hash', $visualHash];
     foreach($matchQueries as $mq){
-        $visualClause = ($mq[0] === 'visual_hash') ? " AND `visual_version` = 2" : '';
+        $visualClause = ($mq[0] === 'visual_hash') ? " AND `visual_version` = 3" : '';
         $stmt = @$connection->prepare("SELECT `pay_hash`,`user_id`,`created_at` FROM `receipt_fingerprints` WHERE `{$mq[0]}` = ?{$visualClause} AND `pay_hash` <> ? ORDER BY `id` ASC LIMIT 50");
         if(!$stmt) continue;
         $stmt->bind_param('ss', $mq[1], $payHash);
@@ -7965,7 +8005,7 @@ function v2raystore_registerReceiptFingerprint($payHash, $userId, $fileUniqueId 
     $now = time();
     $stmt = @$connection->prepare("INSERT INTO `receipt_fingerprints` (`pay_hash`,`user_id`,`file_unique_id`,`content_hash`,`visual_hash`,`visual_version`,`created_at`) VALUES (?,?,?,?,?,?,?)");
     if($stmt){
-        $visualVersion = 2;
+        $visualVersion = 3;
         $stmt->bind_param('sisssii', $payHash, $userId, $fileUniqueId, $contentHash, $visualHash, $visualVersion, $now);
         @$stmt->execute();
         $stmt->close();
@@ -8009,7 +8049,7 @@ function v2raystore_duplicateReceiptOwnerText($userId){
     return 'نام ثبت نشده';
 }
 
-function v2raystore_warnDuplicateReceipt($duplicate, $messages = []){
+function v2raystore_warnDuplicateReceipt($duplicate, $messages = [], $currentHash = ''){
     if(empty($duplicate['duplicate']) || !is_array($messages)) return;
     $oldHash = trim((string)($duplicate['pay_hash'] ?? ''));
     $oldUser = intval($duplicate['user_id'] ?? 0);
@@ -8031,15 +8071,31 @@ function v2raystore_warnDuplicateReceipt($duplicate, $messages = []){
         if($shown >= 30) break;
     }
     if($shown === 0 && $oldHash !== '') $text .= "\n🧾 کد پرداخت: <code>" . v2raystore_h($oldHash) . "</code>";
+    $settings = v2raystore_receiptCheckSettings();
+    if(!empty($settings['reminders']) && $currentHash !== '') $keyboard[] = [['text'=>'✅ رسید بررسی و تأیید شد','callback_data'=>'ackDuplicateReceipt' . $currentHash,'style'=>'success']];
     $text .= "\n\nلطفاً رسید را دستی بررسی کنید؛ سفارش رد یا متوقف نشده است.";
-    foreach($messages as $item){
-        $chatId = intval($item[0] ?? 0);
-        $messageId = intval($item[1] ?? 0);
+    // هشدار باید روی پیام رسید قبلی قرار بگیرد، نه روی رسید تازه‌ای که باعث
+    // هشدار شده است. قدیمی‌ترین پیام ثبت‌شده برای اولین تطبیق انتخاب می‌شود.
+    $replyTargets = [];
+    foreach($matches as $item){
+        $hash = trim((string)($item['pay_hash'] ?? ''));
+        if($hash === '' || !function_exists('v2raystore_getAdminPayMessages')) continue;
+        foreach(v2raystore_getAdminPayMessages($hash) as $target) $replyTargets[] = $target;
+    }
+    if(empty($replyTargets)) $replyTargets = $messages;
+    $sentWarning = null;
+    foreach($replyTargets as $item){
+        $chatId = intval($item[0] ?? 0); $messageId = intval($item[1] ?? 0);
         if($chatId != 0 && $messageId > 0){
-            // فقط یک پیام هشدار جداگانه ارسال می‌شود تا برای چند ادمین اعلان تکراری ساخته نشود.
-            @sendMessage($text, !empty($keyboard) ? json_encode(['inline_keyboard'=>$keyboard], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null, 'HTML', $chatId, $messageId);
-            break;
+            $sentWarning = @sendMessage($text, !empty($keyboard) ? json_encode(['inline_keyboard'=>$keyboard], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null, 'HTML', $chatId, $messageId);
+            if(is_object($sentWarning) && !empty($sentWarning->ok)) break;
         }
+    }
+    if(!empty($sentWarning->ok) && !empty($settings['reminders']) && $currentHash !== ''){
+        $warningMsg = intval($sentWarning->result->message_id ?? 0);
+        $warningChat = intval($sentWarning->result->chat->id ?? 0);
+        if($warningChat === 0 && !empty($replyTargets[0][0])) $warningChat = intval($replyTargets[0][0]);
+        v2raystore_markDuplicateReceiptPending($currentHash, $warningChat, $warningMsg);
     }
 }
 
@@ -18643,7 +18699,7 @@ function addUser($server_id, $client_id, $protocol, $port, $expiryTime, $remark,
 // ===== V2Ray Store extra realtime reports + auto order approval =====
 function v2raystore_ensureAutoOrderColumns(){
     global $connection;
-    if(function_exists('v2raystore_schemaPatchDone') && v2raystore_schemaPatchDone('AUTO_ORDER_REPORTS_V4')) return;
+    if(function_exists('v2raystore_schemaPatchDone') && v2raystore_schemaPatchDone('AUTO_ORDER_REPORTS_V5')) return;
 
     $payColumns = [
         'sent_date' => "ALTER TABLE `pays` ADD `sent_date` int(255) NOT NULL DEFAULT 0 AFTER `request_date`",
@@ -18655,7 +18711,12 @@ function v2raystore_ensureAutoOrderColumns(){
         'admin_message_id' => "ALTER TABLE `pays` ADD `admin_message_id` int(20) NOT NULL DEFAULT 0 AFTER `admin_chat_id`",
         'approval_error' => "ALTER TABLE `pays` ADD `approval_error` text DEFAULT NULL AFTER `admin_message_id`",
         'approval_error_date' => "ALTER TABLE `pays` ADD `approval_error_date` int(255) NOT NULL DEFAULT 0 AFTER `approval_error`",
-        'receipt_file_id' => "ALTER TABLE `pays` ADD `receipt_file_id` varchar(255) DEFAULT NULL AFTER `approval_error_date`"
+        'receipt_file_id' => "ALTER TABLE `pays` ADD `receipt_file_id` varchar(255) DEFAULT NULL AFTER `approval_error_date`",
+        'duplicate_receipt_pending' => "ALTER TABLE `pays` ADD `duplicate_receipt_pending` tinyint(1) NOT NULL DEFAULT 0 AFTER `receipt_file_id`",
+        'duplicate_receipt_ack_at' => "ALTER TABLE `pays` ADD `duplicate_receipt_ack_at` int(11) NOT NULL DEFAULT 0 AFTER `duplicate_receipt_pending`",
+        'duplicate_receipt_last_reminder_at' => "ALTER TABLE `pays` ADD `duplicate_receipt_last_reminder_at` int(11) NOT NULL DEFAULT 0 AFTER `duplicate_receipt_ack_at`",
+        'duplicate_receipt_warning_chat_id' => "ALTER TABLE `pays` ADD `duplicate_receipt_warning_chat_id` bigint(30) NOT NULL DEFAULT 0 AFTER `duplicate_receipt_last_reminder_at`",
+        'duplicate_receipt_warning_message_id' => "ALTER TABLE `pays` ADD `duplicate_receipt_warning_message_id` int(20) NOT NULL DEFAULT 0 AFTER `duplicate_receipt_warning_chat_id`"
     ];
     foreach($payColumns as $column => $query){
         $exists = @($connection->query("SHOW COLUMNS FROM `pays` LIKE '$column'"));
@@ -18672,7 +18733,7 @@ function v2raystore_ensureAutoOrderColumns(){
         if($exists && $exists->num_rows == 0) @($connection->query($query));
     }
 
-    if(function_exists('v2raystore_markSchemaPatchDone')) v2raystore_markSchemaPatchDone('AUTO_ORDER_REPORTS_V4');
+    if(function_exists('v2raystore_markSchemaPatchDone')) v2raystore_markSchemaPatchDone('AUTO_ORDER_REPORTS_V5');
 }
 v2raystore_ensureAutoOrderColumns();
 
@@ -18903,13 +18964,20 @@ function v2raystore_reportEnsureTopic($eventKey, $forceRebuild = false){
     $topics = v2raystore_reportTopicStore();
     $threadId = intval($topics[$topicKey] ?? 0);
     if($threadId > 0){
-        // قبل از ساخت مجدد، وجود تاپیک ذخیره‌شده را با یک ویرایش بی‌تغییر
-        // بررسی می‌کنیم؛ در نتیجه تاپیک‌های موجود دوباره ساخته نمی‌شوند.
+        // در ارسال عادی هیچ APIای برای اعتبارسنجی صدا زده نمی‌شود؛ مهم‌تر از
+        // همه، هر خطای موقت نباید باعث ساخت تاپیک تکراری شود.
+        if(!$forceRebuild) return $threadId;
         $check = bot('editForumTopic', ['chat_id'=>$chat, 'message_thread_id'=>$threadId, 'name'=>$title]);
         if(is_object($check) && !empty($check->ok)) return $threadId;
+        $desc = strtolower((string)($check->description ?? ''));
+        // فقط خطاهای صریحِ حذف/نامعتبر بودن اجازهٔ ساخت جایگزین می‌دهند؛
+        // خطای دسترسی یا شبکه هرگز تاپیک تازه نمی‌سازد.
+        if(!preg_match('/not found|invalid|thread_id|message thread|topic.*(not|invalid)|forum topic/i', $desc)) return 0;
         unset($topics[$topicKey]);
         v2raystore_saveReportTopicStore($topics);
     }
+
+    if(!$forceRebuild) return 0;
 
     $res = bot('createForumTopic', [
         'chat_id' => $chat,
@@ -21373,7 +21441,7 @@ function v2raystore_processCartToCartReceiptUpload($hashId, $stepPrefix, $fileId
     // تشخیص فقط برای هشدار است و هیچ‌وقت نتیجهٔ ثبت رسید/سفارش را تغییر نمی‌دهد.
     if(!empty($receiptSettings['enabled'])){
         $duplicate = v2raystore_registerReceiptFingerprint($hashId, $uid, $fileUniqueId, $contentHash, $visualHash);
-        if(!empty($duplicate['duplicate'])) v2raystore_warnDuplicateReceipt($duplicate, $adminSend['messages'] ?? []);
+        if(!empty($duplicate['duplicate'])) v2raystore_warnDuplicateReceipt($duplicate, $adminSend['messages'] ?? [], $hashId);
     }
 
     $type = (string)($pay['type'] ?? '');

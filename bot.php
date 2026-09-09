@@ -83,6 +83,15 @@ if(($data ?? '') === 'rewardGiftNotice'){
 
 // مشاهدهٔ سفارش قبلی از هشدار فیش تکراری. به‌جای tg://openmessage که در بعضی
 // کلاینت‌های تلگرام کار نمی‌کند، پیام اصلی سفارش را در همین گفت‌وگو کپی می‌کند.
+if(preg_match('/^ackDuplicateReceipt(.+)$/', (string)($data ?? ''), $ackDuplicateMatch) && ($from_id == $admin || $v2raystoreIsAdminUser)){
+    $ackHash = trim((string)$ackDuplicateMatch[1]);
+    $ok = function_exists('v2raystore_ackDuplicateReceipt') ? v2raystore_ackDuplicateReceipt($ackHash) : false;
+    if($ok){
+        editKeys(json_encode(['inline_keyboard'=>[[['text'=>'✅ بررسی شد؛ یادآوری متوقف است','callback_data'=>'noop_duplicate_ack','style'=>'success']]]], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+        alert('رسید تأیید شد؛ یادآوری ساعتی متوقف شد.');
+    }else alert('ثبت تأیید رسید ناموفق بود.', true);
+    exit();
+}
 if(preg_match('/^duplicateReceiptOrder(.+)$/', (string)($data ?? ''), $duplicateOrderMatch) && ($from_id == $admin || $v2raystoreIsAdminUser)){
     $duplicateHash = trim((string)$duplicateOrderMatch[1]);
     $targets = function_exists('v2raystore_getAdminPayMessages') ? v2raystore_getAdminPayMessages($duplicateHash) : [];
@@ -626,7 +635,7 @@ if($data == 'rebuildReportForumTopics' && ($from_id == $admin || $userInfo['isAd
         $eventKey = count($events) ? $events[0] : 'daily_stats';
         // تاپیک موجود با editForumTopic اعتبارسنجی می‌شود و فقط در صورت
         // حذف/نامعتبر بودن شناسه، تاپیک جدید ساخته خواهد شد.
-        $thread = v2raystore_reportEnsureTopic($eventKey);
+        $thread = v2raystore_reportEnsureTopic($eventKey, true);
         if($thread > 0) $made++;
     }
     alert($made > 0 ? 'تاپیک‌ها ساخته/ترمیم شدند.' : 'ساخت تاپیک ناموفق بود؛ گروه باید Forum باشد و ربات دسترسی مدیریت تاپیک داشته باشد.', $made <= 0);
@@ -2034,6 +2043,12 @@ if(($data ?? '') === 'receiptDuplicateSettings' && ($from_id == $admin || (!empt
 if(($data ?? '') === 'toggleReceiptDuplicateCheck' && ($from_id == $admin || (!empty($userInfo) && $userInfo['isAdmin'] == true))){
     $s = v2raystore_receiptCheckSettings();
     setSettings('receiptDuplicateCheckState', $s['enabled'] ? 'off' : 'on');
+    editText($message_id, v2raystore_receiptCheckMenuText(), v2raystore_receiptCheckMenuKeys(), 'HTML');
+    exit();
+}
+if(($data ?? '') === 'toggleDuplicateReceiptReminders' && ($from_id == $admin || (!empty($userInfo) && $userInfo['isAdmin'] == true))){
+    $s = v2raystore_receiptCheckSettings();
+    setSettings('duplicateReceiptReminderState', !empty($s['reminders']) ? 'off' : 'on');
     editText($message_id, v2raystore_receiptCheckMenuText(), v2raystore_receiptCheckMenuKeys(), 'HTML');
     exit();
 }
