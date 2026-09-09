@@ -32,6 +32,12 @@ try {
         v2raystore_processDailyChannelStats(false);
     }
 
+    // یادآوری فیش‌های تکراری هر ساعت از همین کران اجرا می‌شود؛ در حالت خاموش
+    // هیچ کوئری/پیامی ارسال نمی‌شود.
+    if(function_exists('v2raystore_processDuplicateReceiptReminders')){
+        v2raystore_processDuplicateReceiptReminders();
+    }
+
     // بکاپ دیتابیس؛ برای سازگاری با نسخه‌های قدیمی و جدید هر دو نام تابع پشتیبانی می‌شود.
     if(function_exists('wizwiz_runReportDatabaseBackups')){
         wizwiz_runReportDatabaseBackups(false);
