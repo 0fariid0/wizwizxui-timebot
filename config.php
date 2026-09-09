@@ -18952,8 +18952,8 @@ function v2raystore_reportEnsureTopic($eventKey, $forceRebuild = false){
     v2raystore_reportCleanupLegacyTopics();
     $chat = v2raystore_getIncomeReportChatId();
     if($chat === null || trim((string)$chat) === '') return 0;
-    // برای گزارش‌های حذف کانفیگ، تاپیک به‌صورت خودکار ساخته می‌شود حتی اگر حالت کلی تاپیک‌ها خاموش باشد.
-    // اگر گروه Forum نباشد یا ربات دسترسی ساخت تاپیک نداشته باشد، گزارش بدون تاپیک ارسال می‌شود.
+    // ساخت تاپیک فقط با عملیات صریح «ساخت/ترمیم انتخاب‌شده» انجام می‌شود؛
+    // ارسال عادی گزارش هرگز تاپیک جدید ایجاد نمی‌کند.
     if(!v2raystore_reportForumEnabled() && trim((string)$eventKey) !== 'cleanup_deleted') return 0;
 
     $topicKey = v2raystore_reportTopicKeyForEvent($eventKey);
@@ -19000,14 +19000,30 @@ function v2raystore_reportDeleteTopic($topicKey){
     if($chat === null || trim((string)$chat) === '' || $topicKey === '') return false;
     $topics = v2raystore_reportTopicStore();
     $threadId = intval($topics[$topicKey] ?? 0);
-    unset($topics[$topicKey]);
-    v2raystore_saveReportTopicStore($topics);
     if($threadId <= 0) return false;
     $res = bot('deleteForumTopic', [
         'chat_id' => $chat,
         'message_thread_id' => $threadId,
     ]);
-    return is_object($res) && !empty($res->ok);
+    $ok = is_object($res) && !empty($res->ok);
+    $desc = strtolower((string)($res->description ?? ''));
+    // اگر تاپیک قبلاً دستی حذف شده باشد، اتصال ذخیره‌شده هم باید پاک شود؛
+    // اما خطای دسترسی/شبکه نباید باعث گم‌شدن شناسه برای تلاش بعدی شود.
+    if($ok || preg_match('/not found|invalid|thread_id|message thread|topic/i', $desc)){
+        unset($topics[$topicKey]);
+        v2raystore_saveReportTopicStore($topics);
+    }
+    return $ok;
+}
+
+function v2raystore_reportUnlinkTopic($topicKey){
+    $topicKey = trim((string)$topicKey);
+    if($topicKey === '') return false;
+    $topics = v2raystore_reportTopicStore();
+    if(!array_key_exists($topicKey, $topics)) return false;
+    unset($topics[$topicKey]);
+    v2raystore_saveReportTopicStore($topics);
+    return true;
 }
 
 function v2raystore_reportDeleteTopicForEvent($eventKey){
@@ -19867,11 +19883,40 @@ function v2raystore_getReportSettingsMenuKeys(){
 
     $rows[] = [[ 'text'=>'🗄 تنظیمات بکاپ دیتابیس', 'callback_data'=>'reportBackupSettingsMenu', 'style'=>'primary' ]];
 
-    $rows[] = [[ 'text'=>'🧵 انتخاب و مدیریت تاپیک‌ها', 'callback_data'=>'reportTopicSelectionMenu', 'style'=>'primary' ]];
+    $rows[] = [[ 'text'=>'🧵 انتخاب و مدیریت تاپیک‌ها', 'callback_data'=>'reportTopicManagementMenu', 'style'=>'primary' ]];
     $rows[] = [[ 'text'=>'🔔 انتخاب اعلان‌ها', 'callback_data'=>'reportEventSelectionMenu', 'style'=>'primary' ], [ 'text'=>'🧩 جزئیات اعلان‌ها', 'callback_data'=>'reportDetailSelectionMenu', 'style'=>'primary' ]];
     $rows[] = [[ 'text'=>'📊 انتخاب آیتم‌های آمار', 'callback_data'=>'reportStatSelectionMenu', 'style'=>'primary' ]];
     $rows[] = [[ 'text'=>$buttonValues['back_button'] ?? '⬅️ بازگشت', 'callback_data'=>'adminReportsMenu', 'style'=>'primary' ]];
     return json_encode(['inline_keyboard'=>$rows], JSON_UNESCAPED_UNICODE);
+}
+
+function v2raystore_getReportTopicManagementMenuText(){
+    $topics = v2raystore_reportTopicStore();
+    $lines = ["🧵 <b>مدیریت تاپیک‌های گزارش</b>", "", "تاپیک‌ها خودکار ساخته نمی‌شوند؛ از اینجا می‌توانی هرکدام را جداگانه تست یا حذف کنی.", ""];
+    foreach(v2raystore_reportTopicItems() as $key=>$info){
+        $id = intval($topics[$key] ?? 0);
+        $lines[] = ($id > 0 ? '✅' : '⚠️') . ' <b>' . v2raystore_h($info['title']) . '</b>' . ($id > 0 ? ' — شناسه <code>' . $id . '</code>' : ' — ثبت نشده');
+    }
+    return implode("\n", $lines);
+}
+
+function v2raystore_getReportTopicManagementMenuKeys(){
+    global $buttonValues;
+    $topics = v2raystore_reportTopicStore(); $rows = [];
+    foreach(v2raystore_reportTopicItems() as $key=>$info){
+        $id = intval($topics[$key] ?? 0);
+        if($id > 0) $rows[] = [
+            ['text'=>'🧪 تست ' . v2raystore_shortButtonText($info['title'], 20), 'callback_data'=>'testReportTopic_' . $key, 'style'=>'primary'],
+            ['text'=>'🔌 لغو اتصال', 'callback_data'=>'unlinkReportTopic_' . $key],
+            ['text'=>'🗑 حذف همین', 'callback_data'=>'deleteReportTopicAsk_' . $key, 'style'=>'danger']
+        ];
+    }
+    $rows[] = [['text'=>'✅ انتخاب نوع گزارش‌ها','callback_data'=>'reportTopicSelectionMenu','style'=>'primary']];
+    $rows[] = [['text'=>'🗑 حذف همهٔ تاپیک‌های ثبت‌شده','callback_data'=>'deleteAllReportForumTopicsAsk','style'=>'danger']];
+    $rows[] = [['text'=>'🗑 حذف دستی تاپیک با لینک','callback_data'=>'setDeleteReportTopicManual','style'=>'danger']];
+    $rows[] = [['text'=>'✍️ ثبت دستی تاپیک موجود','callback_data'=>'setReportTopicManual','style'=>'primary']];
+    $rows[] = [['text'=>'⬅️ بازگشت به تنظیمات گزارش','callback_data'=>'reportChannelSettingsMenu']];
+    return json_encode(['inline_keyboard'=>$rows], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 }
 
 function v2raystore_getReportBackupSettingsMenuText(){

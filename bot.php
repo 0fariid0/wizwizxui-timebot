@@ -565,19 +565,59 @@ if($data == 'toggleReportForumTopics' && ($from_id == $admin || $userInfo['isAdm
         alert('ارسال تاپیکی خاموش شد؛ تاپیک‌های موجود حذف نمی‌شوند.');
     }else{
         setSettings('storeReportForumState', 'on');
-        alert('حالت تاپیک فعال شد. با اولین گزارش، تاپیک مربوطه ساخته می‌شود.');
+        alert('حالت تاپیک فعال شد. تاپیک‌ها فقط از بخش ساخت/ترمیم انتخاب‌شده ساخته می‌شوند.');
     }
     editText($message_id, v2raystore_getReportSettingsMenuText(), v2raystore_getReportSettingsMenuKeys(), 'HTML');
     exit();
 }
-if(preg_match('/^report(Topic|Event|Detail|Stat)SelectionMenu$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+if(preg_match('/^report(Event|Detail|Stat)SelectionMenu$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
     $type = strtolower($m[1]);
     editText($message_id, '✅ موردهای فعال را انتخاب کنید؛ موارد غیرفعال حذف نمی‌شوند و تاپیک‌های موجود هم باقی می‌مانند.', v2raystore_getReportSelectionMenuKeys($type), 'HTML');
+    exit();
+}
+if(($data ?? '') === 'reportTopicManagementMenu' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    editText($message_id, v2raystore_getReportTopicManagementMenuText(), v2raystore_getReportTopicManagementMenuKeys(), 'HTML');
+    exit();
+}
+if(($data ?? '') === 'reportTopicSelectionMenu' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    editText($message_id, '✅ نوع گزارش‌هایی را که باید در تاپیک ارسال شوند انتخاب کن؛ این گزینه تاپیک‌ها را حذف نمی‌کند.', v2raystore_getReportSelectionMenuKeys('topic'), 'HTML');
     exit();
 }
 if(($data ?? '') === 'setReportTopicManual' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
     sendMessage("✍️ لینک تاپیک موجود را ارسال کنید.\n\nمثال:\n<code>https://t.me/c/3109006734/230</code>\n\nعدد آخر لینک، شناسهٔ تاپیک است.", $cancelKey, 'HTML');
     setUser('setReportTopicManual');
+    exit();
+}
+if(($data ?? '') === 'setDeleteReportTopicManual' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    sendMessage("🗑 لینک تاپیکی که باید از گروه حذف شود را ارسال کن.\n\nمثال:\n<code>https://t.me/c/3109006734/230</code>\n\nاین عملیات خود تاپیک را از گروه حذف می‌کند و قابل بازگشت نیست.", $cancelKey, 'HTML');
+    setUser('deleteReportTopicManual');
+    exit();
+}
+if(($userInfo['step'] ?? '') === 'deleteReportTopicManual' && ($text ?? '') !== ($buttonValues['cancel'] ?? '') && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $rawLink = trim((string)$text);
+    $rawLink = strtr($rawLink, ['۰'=>'0','۱'=>'1','۲'=>'2','۳'=>'3','۴'=>'4','۵'=>'5','۶'=>'6','۷'=>'7','۸'=>'8','۹'=>'9','٠'=>'0','١'=>'1','٢'=>'2','٣'=>'3','٤'=>'4','٥'=>'5','٦'=>'6','٧'=>'7','٨'=>'8','٩'=>'9']);
+    $deleteChat = 0; $deleteThread = 0;
+    if(preg_match('~(?:https?://)?t\.me/c/(\d+)/(\d+)~i', $rawLink, $mm)){
+        $deleteChat = intval('-100' . $mm[1]); $deleteThread = intval($mm[2]);
+    }elseif(preg_match('/^(-?\d+)\s*[,\s]+(\d+)$/', $rawLink, $mm)){
+        $deleteChat = intval($mm[1]); $deleteThread = intval($mm[2]);
+    }
+    if($deleteChat == 0 || $deleteThread <= 0){
+        sendMessage('❌ لینک معتبر نیست. نمونهٔ درست: <code>https://t.me/c/3109006734/230</code>', $cancelKey, 'HTML');
+        exit();
+    }
+    $res = bot('deleteForumTopic', ['chat_id'=>$deleteChat, 'message_thread_id'=>$deleteThread]);
+    $ok = is_object($res) && !empty($res->ok);
+    if($ok){
+        $storedTopics = v2raystore_reportTopicStore(); $changed = false;
+        foreach($storedTopics as $storedKey=>$storedThread){
+            if(intval($storedThread) === $deleteThread){ unset($storedTopics[$storedKey]); $changed = true; }
+        }
+        if($changed) v2raystore_saveReportTopicStore($storedTopics);
+    }
+    setUser();
+    sendMessage($ok ? '✅ تاپیک با موفقیت از گروه حذف شد.' : '❌ حذف تاپیک ناموفق بود. ربات باید در همان گروه دسترسی مدیریت تاپیک داشته باشد.', $removeKeyboard, 'HTML');
+    sendMessage(v2raystore_getReportTopicManagementMenuText(), v2raystore_getReportTopicManagementMenuKeys(), 'HTML');
     exit();
 }
 if(($userInfo['step'] ?? '') === 'setReportTopicManual' && ($text ?? '') !== ($buttonValues['cancel'] ?? '') && ($from_id == $admin || $userInfo['isAdmin'] == true)){
@@ -609,7 +649,7 @@ if(preg_match('/^manualReportTopic\|([a-z_]+)\|(-?\d+)\|(\d+)$/', $data ?? '', $
     v2raystore_saveReportTopicStore($topics);
     setUser();
     alert('تاپیک موجود با موفقیت ثبت شد. تاپیک جدیدی ساخته نشد.');
-    editText($message_id, v2raystore_getReportSettingsMenuText(), v2raystore_getReportSettingsMenuKeys(), 'HTML');
+    editText($message_id, v2raystore_getReportTopicManagementMenuText(), v2raystore_getReportTopicManagementMenuKeys(), 'HTML');
     exit();
 }
 if(preg_match('/^toggleReportTopic_(.+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
@@ -624,6 +664,48 @@ if($data == 'deleteAllReportForumTopics' && ($from_id == $admin || $userInfo['is
     v2raystore_reportDeleteAllTopics();
     alert('تاپیک‌های ذخیره‌شده حذف شدند.');
     editText($message_id, v2raystore_getReportSettingsMenuText(), v2raystore_getReportSettingsMenuKeys(), 'HTML');
+    exit();
+}
+if(preg_match('/^testReportTopic_([a-z_]+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $key = $m[1]; $items = v2raystore_reportTopicItems(); $topics = v2raystore_reportTopicStore();
+    $chat = v2raystore_getIncomeReportChatId(); $thread = intval($topics[$key] ?? 0);
+    if(!isset($items[$key]) || $thread <= 0 || $chat === null || trim((string)$chat)===''){ alert('تاپیک ثبت نشده یا مقصد گزارش نامعتبر است.', true); exit(); }
+    $res = bot('sendMessage', ['chat_id'=>$chat, 'message_thread_id'=>$thread, 'text'=>'🧪 تست تاپیک «' . $items[$key]['title'] . '»\n✅ این تاپیک در دسترس است.', 'parse_mode'=>'HTML', '_timeout'=>8]);
+    alert((is_object($res) && !empty($res->ok)) ? 'پیام تست داخل تاپیک ارسال شد.' : 'ارسال تست ناموفق بود؛ دسترسی یا شناسه تاپیک را بررسی کن.', !(is_object($res) && !empty($res->ok)));
+    exit();
+}
+if(preg_match('/^deleteReportTopicAsk_([a-z_]+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $key = $m[1]; $items = v2raystore_reportTopicItems();
+    if(!isset($items[$key])){ alert('تاپیک نامعتبر است.', true); exit(); }
+    editText($message_id, '⚠️ آیا تاپیک «<b>' . v2raystore_h($items[$key]['title']) . '</b>» از گروه حذف شود؟ این کار قابل بازگشت نیست.', json_encode(['inline_keyboard'=>[
+        [['text'=>'🗑 بله، حذف شود','callback_data'=>'deleteReportTopicDo_' . $key,'style'=>'danger']],
+        [['text'=>'لغو','callback_data'=>'reportTopicManagementMenu']]
+    ]], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES), 'HTML');
+    exit();
+}
+if(preg_match('/^unlinkReportTopic_([a-z_]+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $ok = function_exists('v2raystore_reportUnlinkTopic') ? v2raystore_reportUnlinkTopic($m[1]) : false;
+    alert($ok ? 'اتصال تاپیک لغو شد؛ خود تاپیک حذف نشد.' : 'این تاپیک ثبت نشده است.', !$ok);
+    editText($message_id, v2raystore_getReportTopicManagementMenuText(), v2raystore_getReportTopicManagementMenuKeys(), 'HTML');
+    exit();
+}
+if(preg_match('/^deleteReportTopicDo_([a-z_]+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $ok = v2raystore_reportDeleteTopic($m[1]);
+    alert($ok ? 'تاپیک حذف شد.' : 'حذف تاپیک ناموفق بود یا قبلاً حذف شده است.', !$ok);
+    editText($message_id, v2raystore_getReportTopicManagementMenuText(), v2raystore_getReportTopicManagementMenuKeys(), 'HTML');
+    exit();
+}
+if(($data ?? '') === 'deleteAllReportForumTopicsAsk' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    editText($message_id, '⚠️ همهٔ تاپیک‌های ثبت‌شده از گروه حذف شوند؟ این کار قابل بازگشت نیست.', json_encode(['inline_keyboard'=>[
+        [['text'=>'🗑 بله، همه حذف شوند','callback_data'=>'deleteAllReportForumTopicsDo','style'=>'danger']],
+        [['text'=>'لغو','callback_data'=>'reportTopicManagementMenu']]
+    ]], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES), 'HTML');
+    exit();
+}
+if(($data ?? '') === 'deleteAllReportForumTopicsDo' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    v2raystore_reportDeleteAllTopics();
+    alert('تاپیک‌های ثبت‌شده حذف شدند.');
+    editText($message_id, v2raystore_getReportTopicManagementMenuText(), v2raystore_getReportTopicManagementMenuKeys(), 'HTML');
     exit();
 }
 if($data == 'rebuildReportForumTopics' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
