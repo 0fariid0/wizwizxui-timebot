@@ -18913,18 +18913,50 @@ function v2raystore_reportTopicKeyForEvent($eventKey){
     return 'general';
 }
 
-function v2raystore_reportTopicStore(){
-    global $botState;
+function v2raystore_normalizeReportTopicStore($topics){
+    if(!is_array($topics)) return [];
+    $allowed = array_keys(v2raystore_reportTopicItems());
+    $clean = [];
+    $usedThreads = [];
+    foreach($topics as $key=>$threadId){
+        $key = trim((string)$key);
+        $threadId = intval($threadId);
+        if($threadId > 0 && in_array($key, $allowed, true) && !isset($usedThreads[$threadId])){
+            $clean[$key] = $threadId;
+            $usedThreads[$threadId] = true;
+        }
+    }
+    return $clean;
+}
+
+function v2raystore_reportTopicStore($fresh = false){
+    global $botState, $connection;
     $raw = $botState['storeReportForumTopics'] ?? '';
-    if(is_array($raw)) return $raw;
+    if($fresh && isset($connection) && $connection instanceof mysqli){
+        $stmt = @$connection->prepare("SELECT `value` FROM `setting` WHERE `type` = 'BOT_STATES' LIMIT 1");
+        if($stmt){
+            if($stmt->execute()){
+                $row = $stmt->get_result()->fetch_assoc();
+                $state = json_decode((string)($row['value'] ?? ''), true);
+                if(is_array($state)){
+                    $raw = $state['storeReportForumTopics'] ?? $raw;
+                    foreach($state as $key=>$value){
+                        if(strpos((string)$key, 'storeReportTopic') === 0 || $key === 'storeReportForumTopics') $botState[$key] = $value;
+                    }
+                }
+            }
+            $stmt->close();
+        }
+    }
+    if(is_array($raw)) return v2raystore_normalizeReportTopicStore($raw);
     $raw = trim((string)$raw);
     if($raw === '') return [];
     $decoded = json_decode($raw, true);
-    return is_array($decoded) ? $decoded : [];
+    return v2raystore_normalizeReportTopicStore(is_array($decoded) ? $decoded : []);
 }
 
 function v2raystore_saveReportTopicStore($topics){
-    if(!is_array($topics)) $topics = [];
+    $topics = v2raystore_normalizeReportTopicStore($topics);
     setSettings('storeReportForumTopics', json_encode($topics, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 }
 
@@ -18933,12 +18965,6 @@ function v2raystore_reportTopicEnabled($topicKey){
     if($topicKey === '') return false;
     global $botState;
     return (($botState['storeReportTopicState_' . $topicKey] ?? 'on') === 'on');
-}
-
-function v2raystore_reportTopicAutoCreateEnabled($topicKey){
-    global $botState;
-    $topicKey = trim((string)$topicKey);
-    return $topicKey !== '' && (($botState['storeReportTopicAuto_' . $topicKey] ?? 'off') === 'on');
 }
 
 function v2raystore_reportTopicHasEnabledEvents($topicKey){
@@ -18971,7 +18997,7 @@ function v2raystore_reportEnsureTopic($eventKey, $forceRebuild = false){
 
     $items = v2raystore_reportTopicItems();
     $title = $items[$topicKey]['title'] ?? ('📌 ' . $topicKey);
-    $topics = v2raystore_reportTopicStore();
+    $topics = v2raystore_reportTopicStore($forceRebuild);
     $threadId = intval($topics[$topicKey] ?? 0);
     if($threadId > 0){
         // در ارسال عادی هیچ APIای برای اعتبارسنجی صدا زده نمی‌شود؛ مهم‌تر از
@@ -18987,14 +19013,20 @@ function v2raystore_reportEnsureTopic($eventKey, $forceRebuild = false){
         v2raystore_saveReportTopicStore($topics);
     }
 
-    // حالت خودکار فقط با «لغو اتصال / خودکار» برای همان دسته فعال می‌شود؛
-    // حالت پیش‌فرض خاموش است تا ارسال گزارش باعث ساخت زنجیره‌ای تاپیک نشود.
-    if(!$forceRebuild && !v2raystore_reportTopicAutoCreateEnabled($topicKey)) return 0;
+    // ارسال عادی هرگز تاپیک جدید نمی‌سازد. ساخت فقط از دکمه صریح
+    // «ساخت/ترمیم انتخاب‌شده» انجام می‌شود تا تاپیک‌های تکراری ساخته نشوند.
+    if(!$forceRebuild) return 0;
 
     // وب‌هوک و کران ممکن است هم‌زمان اجرا شوند؛ قفل کوتاه‌مدت مانع ساخت
     // هم‌زمان چند تاپیک برای یک دسته می‌شود.
     $lock = @fopen(sys_get_temp_dir() . '/v2raystore_topic_' . md5((string)$chat . '|' . $topicKey) . '.lock', 'c');
     if($lock && !@flock($lock, LOCK_EX | LOCK_NB)){ @fclose($lock); return 0; }
+    $topics = v2raystore_reportTopicStore(true);
+    $threadId = intval($topics[$topicKey] ?? 0);
+    if($threadId > 0){
+        if($lock){ @flock($lock, LOCK_UN); @fclose($lock); }
+        return $threadId;
+    }
     $res = bot('createForumTopic', [
         'chat_id' => $chat,
         'name' => $title,
@@ -19002,6 +19034,7 @@ function v2raystore_reportEnsureTopic($eventKey, $forceRebuild = false){
     if(is_object($res) && !empty($res->ok) && isset($res->result->message_thread_id)){
         $threadId = intval($res->result->message_thread_id);
         if($threadId > 0){
+            $topics = v2raystore_reportTopicStore(true);
             $topics[$topicKey] = $threadId;
             v2raystore_saveReportTopicStore($topics);
             if($lock){ @flock($lock, LOCK_UN); @fclose($lock); }
@@ -19016,7 +19049,7 @@ function v2raystore_reportDeleteTopic($topicKey){
     $chat = v2raystore_getIncomeReportChatId();
     $topicKey = trim((string)$topicKey);
     if($chat === null || trim((string)$chat) === '' || $topicKey === '') return false;
-    $topics = v2raystore_reportTopicStore();
+    $topics = v2raystore_reportTopicStore(true);
     $threadId = intval($topics[$topicKey] ?? 0);
     if($threadId <= 0) return false;
     $res = bot('deleteForumTopic', [
@@ -19037,11 +19070,11 @@ function v2raystore_reportDeleteTopic($topicKey){
 function v2raystore_reportUnlinkTopic($topicKey){
     $topicKey = trim((string)$topicKey);
     if($topicKey === '') return false;
-    $topics = v2raystore_reportTopicStore();
+    $topics = v2raystore_reportTopicStore(true);
     if(!array_key_exists($topicKey, $topics)) return false;
     unset($topics[$topicKey]);
     v2raystore_saveReportTopicStore($topics);
-    setSettings('storeReportTopicAuto_' . $topicKey, 'on');
+    setSettings('storeReportTopicAuto_' . $topicKey, 'off');
     return true;
 }
 
@@ -19052,11 +19085,10 @@ function v2raystore_reportDeleteTopicForEvent($eventKey){
 }
 
 function v2raystore_reportDeleteAllTopics(){
-    $topics = v2raystore_reportTopicStore();
+    $topics = v2raystore_reportTopicStore(true);
     foreach(array_keys($topics) as $topicKey){
         v2raystore_reportDeleteTopic($topicKey);
     }
-    v2raystore_saveReportTopicStore([]);
 }
 
 function v2raystore_reportSendMessage($title, $body, $keyboard = null, $eventKey = null){
@@ -19084,7 +19116,7 @@ function v2raystore_reportSendMessage($title, $body, $keyboard = null, $eventKey
     $desc = is_object($res) && isset($res->description) ? (string)$res->description : '';
     // اگر تاپیک حذف/خراب شده باشد، گزارش نباید از بین برود؛ بدون تاپیک به خود گروه ارسال می‌شود.
     if($threadId > 0 && preg_match('/thread|topic|message thread|not found|invalid/i', $desc)){
-        $topics = v2raystore_reportTopicStore();
+        $topics = v2raystore_reportTopicStore(true);
         $topicKey = v2raystore_reportTopicKeyForEvent($eventKey);
         if(isset($topics[$topicKey])){
             unset($topics[$topicKey]);
@@ -19155,7 +19187,7 @@ function v2raystore_reportSendLocalDocument($filePath, $caption = '', $eventKey 
     if(is_object($res) && !empty($res->ok)) return $res;
     $desc = is_object($res) && isset($res->description) ? (string)$res->description : '';
     if($threadId > 0 && preg_match('/thread|topic|message thread|not found|invalid/i', $desc)){
-        $topics = v2raystore_reportTopicStore();
+        $topics = v2raystore_reportTopicStore(true);
         $topicKey = v2raystore_reportTopicKeyForEvent($eventKey);
         if(isset($topics[$topicKey])){
             unset($topics[$topicKey]);
@@ -20217,26 +20249,28 @@ function v2raystore_getReportSettingsMenuKeys(){
 }
 
 function v2raystore_getReportTopicManagementMenuText(){
-    $topics = v2raystore_reportTopicStore();
-    $lines = ["🧵 <b>مدیریت تاپیک‌های گزارش</b>", "", "تاپیک‌ها خودکار ساخته نمی‌شوند؛ از اینجا می‌توانی هرکدام را جداگانه تست یا حذف کنی.", ""];
+    $topics = v2raystore_reportTopicStore(true);
+    $lines = ["🧵 <b>مدیریت تاپیک‌های گزارش</b>", "", "برای جلوگیری از تاپیک تکراری، ارسال عادی گزارش هیچ‌وقت تاپیک جدید نمی‌سازد. ساخت فقط با دکمهٔ «ساخت/ترمیم انتخاب‌شده» انجام می‌شود.", ""];
     foreach(v2raystore_reportTopicItems() as $key=>$info){
         $id = intval($topics[$key] ?? 0);
-        $mode = v2raystore_reportTopicAutoCreateEnabled($key) ? 'خودکار' : 'دستی';
-        $lines[] = ($id > 0 ? '✅' : '⚠️') . ' <b>' . v2raystore_h($info['title']) . '</b>' . ($id > 0 ? ' — شناسه <code>' . $id . '</code> — ' . $mode : ' — ثبت نشده');
+        $lines[] = ($id > 0 ? '✅' : '⚠️') . ' <b>' . v2raystore_h($info['title']) . '</b>' . ($id > 0 ? ' — شناسه <code>' . $id . '</code>' : ' — ثبت نشده');
     }
     return implode("\n", $lines);
 }
 
 function v2raystore_getReportTopicManagementMenuKeys(){
     global $buttonValues;
-    $topics = v2raystore_reportTopicStore(); $rows = [];
+    $topics = v2raystore_reportTopicStore(true); $rows = [];
     foreach(v2raystore_reportTopicItems() as $key=>$info){
         $id = intval($topics[$key] ?? 0);
-        if($id > 0) $rows[] = [
-            ['text'=>'🧪 تست ' . v2raystore_shortButtonText($info['title'], 20), 'callback_data'=>'testReportTopic_' . $key, 'style'=>'primary'],
-            ['text'=>'🔌 لغو اتصال', 'callback_data'=>'unlinkReportTopic_' . $key],
-            ['text'=>'🗑 حذف همین', 'callback_data'=>'deleteReportTopicAsk_' . $key, 'style'=>'danger']
-        ];
+        $rows[] = [['text'=>'🛠 ساخت/ترمیم ' . v2raystore_shortButtonText($info['title'], 18), 'callback_data'=>'rebuildReportTopic_' . $key, 'style'=>'primary']];
+        if($id > 0){
+            $rows[] = [
+                ['text'=>'🧪 تست', 'callback_data'=>'testReportTopic_' . $key, 'style'=>'primary'],
+                ['text'=>'🔌 لغو اتصال', 'callback_data'=>'unlinkReportTopic_' . $key],
+                ['text'=>'🗑 حذف', 'callback_data'=>'deleteReportTopicAsk_' . $key, 'style'=>'danger']
+            ];
+        }
     }
     $rows[] = [['text'=>'✅ انتخاب نوع گزارش‌ها','callback_data'=>'reportTopicSelectionMenu','style'=>'primary']];
     $rows[] = [['text'=>'🗑 حذف همهٔ تاپیک‌های ثبت‌شده','callback_data'=>'deleteAllReportForumTopicsAsk','style'=>'danger']];

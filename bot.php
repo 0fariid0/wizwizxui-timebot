@@ -609,7 +609,7 @@ if(($userInfo['step'] ?? '') === 'deleteReportTopicManual' && ($text ?? '') !== 
     $res = bot('deleteForumTopic', ['chat_id'=>$deleteChat, 'message_thread_id'=>$deleteThread]);
     $ok = is_object($res) && !empty($res->ok);
     if($ok){
-        $storedTopics = v2raystore_reportTopicStore(); $changed = false;
+        $storedTopics = v2raystore_reportTopicStore(true); $changed = false;
         foreach($storedTopics as $storedKey=>$storedThread){
             if(intval($storedThread) === $deleteThread){ unset($storedTopics[$storedKey]); $changed = true; }
         }
@@ -642,7 +642,13 @@ if(($userInfo['step'] ?? '') === 'setReportTopicManual' && ($text ?? '') !== ($b
 if(preg_match('/^manualReportTopic\|([a-z_]+)\|(-?\d+)\|(\d+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
     $topicKey = $m[1]; $chatId = $m[2]; $threadId = intval($m[3]);
     if(!array_key_exists($topicKey, v2raystore_reportTopicItems()) || $threadId <= 0){ alert('اطلاعات تاپیک نامعتبر است.', true); exit(); }
-    $topics = v2raystore_reportTopicStore();
+    $topics = v2raystore_reportTopicStore(true);
+    foreach($topics as $existingKey=>$existingThread){
+        if($existingKey !== $topicKey && intval($existingThread) === $threadId){
+            alert('این تاپیک قبلاً برای «' . v2raystore_reportTopicItems()[$existingKey]['title'] . '» ثبت شده است.', true);
+            exit();
+        }
+    }
     $topics[$topicKey] = $threadId;
     setSettings('rewardChannel', $chatId);
     setSettings('storeReportTopicState_' . $topicKey, 'on');
@@ -668,11 +674,22 @@ if($data == 'deleteAllReportForumTopics' && ($from_id == $admin || $userInfo['is
     exit();
 }
 if(preg_match('/^testReportTopic_([a-z_]+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
-    $key = $m[1]; $items = v2raystore_reportTopicItems(); $topics = v2raystore_reportTopicStore();
+    $key = $m[1]; $items = v2raystore_reportTopicItems(); $topics = v2raystore_reportTopicStore(true);
     $chat = v2raystore_getIncomeReportChatId(); $thread = intval($topics[$key] ?? 0);
     if(!isset($items[$key]) || $thread <= 0 || $chat === null || trim((string)$chat)===''){ alert('تاپیک ثبت نشده یا مقصد گزارش نامعتبر است.', true); exit(); }
     $res = bot('sendMessage', ['chat_id'=>$chat, 'message_thread_id'=>$thread, 'text'=>'🧪 تست تاپیک «' . $items[$key]['title'] . '»\n✅ این تاپیک در دسترس است.', 'parse_mode'=>'HTML', '_timeout'=>8]);
     alert((is_object($res) && !empty($res->ok)) ? 'پیام تست داخل تاپیک ارسال شد.' : 'ارسال تست ناموفق بود؛ دسترسی یا شناسه تاپیک را بررسی کن.', !(is_object($res) && !empty($res->ok)));
+    exit();
+}
+if(preg_match('/^rebuildReportTopic_([a-z_]+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $key = $m[1];
+    $items = v2raystore_reportTopicItems();
+    if(!isset($items[$key])){ alert('تاپیک نامعتبر است.', true); exit(); }
+    if(!v2raystore_reportForumEnabled()) setSettings('storeReportForumState', 'on');
+    $events = $items[$key]['events'] ?? [];
+    $thread = v2raystore_reportEnsureTopic(count($events) > 0 ? $events[0] : 'daily_stats', true);
+    alert($thread > 0 ? 'تاپیک این دسته ساخته/ترمیم شد.' : 'ساخت یا ترمیم تاپیک ناموفق بود؛ دسترسی مدیریت تاپیک را بررسی کن.', $thread <= 0);
+    editText($message_id, v2raystore_getReportTopicManagementMenuText(), v2raystore_getReportTopicManagementMenuKeys(), 'HTML');
     exit();
 }
 if(preg_match('/^deleteReportTopicAsk_([a-z_]+)$/', $data ?? '', $m) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
@@ -727,7 +744,7 @@ if($data == 'rebuildReportForumTopics' && ($from_id == $admin || $userInfo['isAd
 }
 if($data == 'testReportForumTopics' && ($from_id == $admin || $userInfo['isAdmin'] == true)){
     $chat = v2raystore_getIncomeReportChatId();
-    $topics = v2raystore_reportTopicStore();
+    $topics = v2raystore_reportTopicStore(true);
     $items = v2raystore_reportTopicItems();
     $ok = 0; $failed = 0; $details = [];
     if($chat === null || trim((string)$chat) === ''){
