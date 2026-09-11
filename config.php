@@ -19793,10 +19793,13 @@ function v2raystore_reportEvent($title, $body, $keyboard = null, $eventKey = nul
 }
 
 function v2raystore_buildDailyChannelStatsText($manual = false){
+    global $connection;
     $nowTxt = function_exists('jdate') ? jdate('Y/m/d H:i', time(), '', 'Asia/Tehran', 'fa') : (new DateTime('now', new DateTimeZone('Asia/Tehran')))->format('Y/m/d H:i');
     $title = $manual ? '📊 <b>ارسال دستی آمار کانال</b>' : '📊 <b>گزارش روزانه آمار ربات</b>';
     $periods = v2raystore_statsPeriodStarts();
     $todayStart = intval($periods['today'] ?? 0);
+    $tehranToday = new DateTime('today', new DateTimeZone('Asia/Tehran'));
+    $tomorrowStart = (clone $tehranToday)->modify('+1 day')->getTimestamp();
     $agent = function_exists('v2raystore_statsProductIncome') ? v2raystore_statsProductIncome($todayStart, 0, true) : 0;
     $users = function_exists('v2raystore_statsProductIncome') ? v2raystore_statsProductIncome($todayStart, 0, false, 0, true) : 0;
     $today = $agent + $users;
@@ -19807,7 +19810,46 @@ function v2raystore_buildDailyChannelStatsText($manual = false){
         "\n👤 درآمد کاربران: <b>" . number_format($users) . " تومان</b>" .
         "\n💰 درآمد امروز: <b>" . number_format($today) . " تومان</b>" .
         "\n📆 درآمد ماه تا <b>" . v2raystore_h($monthDate) . "</b>: <b>" . number_format($month) . " تومان</b>";
-    return $title . "\n\n🕒 زمان گزارش: <b>" . v2raystore_h($nowTxt) . "</b>" . $stats;
+
+    // Only successful product payments are shown. Cancelled/declined payments
+    // are excluded by the same predicate used for the income totals above.
+    $payments = [];
+    $paymentTotal = 0;
+    $productWhere = function_exists('v2raystore_statsProductWhere')
+        ? v2raystore_statsProductWhere()
+        : "(`state` IN ('paid','approved'))";
+    $stmt = @$connection->prepare(
+        "SELECT `price` FROM `pays`
+         WHERE {$productWhere} AND `request_date` >= ? AND `request_date` < ?
+         ORDER BY `request_date` ASC, `id` ASC"
+    );
+    if($stmt){
+        $stmt->bind_param('ii', $todayStart, $tomorrowStart);
+        if($stmt->execute()){
+            $result = $stmt->get_result();
+            while($row = $result->fetch_assoc()){
+                $price = intval($row['price'] ?? 0);
+                $payments[] = $price;
+                $paymentTotal += $price;
+            }
+        }
+        $stmt->close();
+    }
+
+    $detail = "\n\n🧾 <b>ریز تراکنش‌های امروز</b>";
+    if(count($payments) > 0){
+        $detail .= "\nجمع کل این <b>" . number_format(count($payments)) . " پرداخت</b>:\n\n";
+        foreach($payments as $price) $detail .= number_format($price) . " تومان\n";
+        $endDate = function_exists('jdate')
+            ? jdate('j F', $todayStart, '', 'Asia/Tehran', 'fa')
+            : $tehranToday->format('d/m');
+        $detail .= "\n<b>پایان " . v2raystore_h($endDate) . "</b>";
+        $detail .= "\n💰 جمع کل پرداخت‌ها: <b>" . number_format($paymentTotal) . " تومان</b>";
+    }else{
+        $detail .= "\nامروز پرداخت موفقی ثبت نشده است.";
+    }
+
+    return $title . "\n\n🕒 زمان گزارش: <b>" . v2raystore_h($nowTxt) . "</b>" . $stats . $detail;
 }
 
 function v2raystore_sendDailyChannelStats($manual = false){
@@ -19823,24 +19865,52 @@ function v2raystore_sendDailyChannelStats($manual = false){
         '_timeout' => 8,
     ];
     if($threadId > 0) $payload['message_thread_id'] = $threadId;
-    bot('sendMessage', $payload);
-    return true;
+    $res = bot('sendMessage', $payload);
+    return function_exists('v2raystore_telegramResponseOk')
+        ? v2raystore_telegramResponseOk($res)
+        : (is_object($res) ? !empty($res->ok) : (is_array($res) ? !empty($res['ok']) : false));
 }
 
 function v2raystore_processDailyChannelStats($force = false){
     if(!$force && !v2raystore_reportIsEnabled('storeReportDailyState', 'on')) return false;
-    $tehranNow = new DateTime('now', new DateTimeZone('Asia/Tehran'));
-    $today = $tehranNow->format('Y-m-d');
-    $time = v2raystore_reportTime();
-    global $botState;
-    $last = (string)($botState['storeReportLastDailyDate'] ?? '');
-    if(!$force){
-        if($last === $today) return false;
-        if($tehranNow->format('H:i') < $time) return false;
+    global $connection, $botState;
+    $lock = @fopen(sys_get_temp_dir() . '/v2raystore_daily_stats.lock', 'c');
+    if($lock && !@flock($lock, LOCK_EX | LOCK_NB)){
+        @fclose($lock);
+        return false;
     }
-    $sent = v2raystore_sendDailyChannelStats($force);
-    if($sent && !$force) setSettings('storeReportLastDailyDate', $today);
-    return $sent;
+
+    try{
+        $tehranNow = new DateTime('now', new DateTimeZone('Asia/Tehran'));
+        $today = $tehranNow->format('Y-m-d');
+        $time = v2raystore_reportTime();
+        $last = (string)($botState['storeReportLastDailyDate'] ?? '');
+        // A second cron process may have loaded config before the first one
+        // finished. Re-read the marker after acquiring the process lock.
+        $stateStmt = @$connection->prepare("SELECT `value` FROM `setting` WHERE `type` = 'BOT_STATES' LIMIT 1");
+        if($stateStmt){
+            if($stateStmt->execute()){
+                $stateRow = $stateStmt->get_result()->fetch_assoc();
+                $freshState = json_decode((string)($stateRow['value'] ?? ''), true);
+                if(is_array($freshState)){
+                    $last = (string)($freshState['storeReportLastDailyDate'] ?? $last);
+                }
+            }
+            $stateStmt->close();
+        }
+        if(!$force){
+            if($last === $today) return false;
+            if($tehranNow->format('H:i') < $time) return false;
+        }
+        $sent = v2raystore_sendDailyChannelStats($force);
+        if($sent && !$force) setSettings('storeReportLastDailyDate', $today);
+        return $sent;
+    }finally{
+        if($lock){
+            @flock($lock, LOCK_UN);
+            @fclose($lock);
+        }
+    }
 }
 
 function v2raystore_getReportSettingsMenuText(){
