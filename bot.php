@@ -880,6 +880,43 @@ if($data == 'sendDailyChannelStatsNow' && ($from_id == $admin || $userInfo['isAd
     editText($message_id, v2raystore_getReportSettingsMenuText(), v2raystore_getReportSettingsMenuKeys(), 'HTML');
     exit();
 }
+if(in_array($data, ['monthlyReportMenu_summary', 'monthlyReportMenu_day', 'sendMonthlyTransactionsNow'], true) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $mode = ($data === 'monthlyReportMenu_day') ? 'day' : 'summary';
+    editText($message_id, v2raystore_getMonthlyReportYearsText($mode), v2raystore_getMonthlyReportYearsKeys($mode), 'HTML');
+    exit();
+}
+if(preg_match('/^monthlyReportYear_(summary|day)_(\d{4})$/', $data, $match) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $mode = $match[1];
+    $year = intval($match[2]);
+    editText($message_id, v2raystore_getMonthlyReportMonthsText($mode, $year), v2raystore_getMonthlyReportMonthsKeys($mode, $year), 'HTML');
+    exit();
+}
+if(preg_match('/^monthlyReportMonth_(summary|day)_(\d{4})_(\d{1,2})$/', $data, $match) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $mode = $match[1];
+    $year = intval($match[2]);
+    $month = intval($match[3]);
+    if($mode === 'summary'){
+        $sent = function_exists('v2raystore_sendMonthlyIncomeSummary')
+            ? v2raystore_sendMonthlyIncomeSummary($year, $month)
+            : false;
+        alert($sent ? 'گزارش درآمد ماه ارسال شد.' : 'ارسال گزارش ماه ناموفق بود.', !$sent);
+        editText($message_id, v2raystore_getMonthlyReportMonthsText($mode, $year), v2raystore_getMonthlyReportMonthsKeys($mode, $year), 'HTML');
+    }else{
+        editText($message_id, v2raystore_getMonthlyReportDaysText($year, $month), v2raystore_getMonthlyReportDaysKeys($year, $month), 'HTML');
+    }
+    exit();
+}
+if(preg_match('/^monthlyReportDay_(\d{4})_(\d{1,2})_(\d{1,2})$/', $data, $match) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
+    $year = intval($match[1]);
+    $month = intval($match[2]);
+    $day = intval($match[3]);
+    $sent = function_exists('v2raystore_sendDayPaymentDetails')
+        ? v2raystore_sendDayPaymentDetails($year, $month, $day)
+        : false;
+    alert($sent ? 'ریز تراکنش‌های روز ارسال شد.' : 'ارسال ریز تراکنش‌های روز ناموفق بود.', !$sent);
+    editText($message_id, v2raystore_getMonthlyReportDaysText($year, $month), v2raystore_getMonthlyReportDaysKeys($year, $month), 'HTML');
+    exit();
+}
 if(preg_match('/^toggleReportEvent_(.+)$/', $data, $match) && ($from_id == $admin || $userInfo['isAdmin'] == true)){
     $key = $match[1];
     if(array_key_exists($key, v2raystore_reportEventItems())){

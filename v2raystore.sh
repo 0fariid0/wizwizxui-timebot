@@ -69,7 +69,19 @@ dot() {
     esac
 }
 kv() { printf " ${DIM}%-18s${NC}: %b${NC}\n" "$1" "$2"; }
-confirm() { local q="$1" a; read -rp "$q [y/n]: " a; [[ "$a" =~ ^[Yy]$ ]]; }
+confirm() {
+    local q="$1" default="${2:-no}" a prompt
+    if [ "$default" = "yes" ]; then
+        prompt="[Y/n]"
+    else
+        prompt="[y/n]"
+    fi
+    read -rp "$q $prompt: " a
+    if [ -z "$a" ] && [ "$default" = "yes" ]; then
+        return 0
+    fi
+    [[ "$a" =~ ^[Yy]$ ]]
+}
 pause_screen() { echo; read -rp "Press Enter to continue..." _; }
 
 banner() {
@@ -1933,7 +1945,7 @@ update_existing() {
         warning "Legacy installation detected. Migrating it while preserving data..."
         migrate_legacy_installation || { error "Legacy migration failed. Nothing was deleted."; return 1; }
     fi
-    confirm "Update ${BRAND_NAME} to ${SCRIPT_VERSION}? Missing prerequisites may be installed; no full operating-system upgrade will run." || return 0
+    confirm "Update ${BRAND_NAME} to ${SCRIPT_VERSION}? Missing prerequisites may be installed; no full operating-system upgrade will run." yes || return 0
     install_or_update_bot_files update || return 1
     php "${BOT_DIR}/install/update.php" || { error "Database migration failed. The source backup is in ${BACKUP_DIR}."; return 1; }
     ensure_webhook_secret || return 1

@@ -12731,6 +12731,10 @@ function getBotReportKeys(){
             ['text'=>"درآمد ماه",'callback_data'=>'v2raystore']
         ],
         [
+            ['text'=>"📊 گزارش درآمد ماهانه",'callback_data'=>'monthlyReportMenu_summary', 'style'=>'success'],
+            ['text'=>"🧾 ریز تراکنش روزانه",'callback_data'=>'monthlyReportMenu_day', 'style'=>'primary']
+        ],
+        [
             ['text'=>$buttonValues['back_button'] ?? "برگشت به مدیریت",'callback_data'=>'adminReportsMenu']
         ]
     ]], JSON_UNESCAPED_UNICODE);
@@ -19913,6 +19917,239 @@ function v2raystore_processDailyChannelStats($force = false){
     }
 }
 
+function v2raystore_reportJalaliMonthBounds($year, $month){
+    $year = intval($year);
+    $month = intval($month);
+    if($year < 1200 || $month < 1 || $month > 12) return null;
+    if(!function_exists('jalali_to_gregorian')) return null;
+
+    $nextYear = $month === 12 ? $year + 1 : $year;
+    $nextMonth = $month === 12 ? 1 : $month + 1;
+    $start = jalali_to_gregorian($year, $month, 1);
+    $end = jalali_to_gregorian($nextYear, $nextMonth, 1);
+    if(!is_array($start) || !is_array($end) || count($start) < 3 || count($end) < 3) return null;
+
+    $tz = new DateTimeZone('Asia/Tehran');
+    $from = new DateTime(sprintf('%04d-%02d-%02d 00:00:00', $start[0], $start[1], $start[2]), $tz);
+    $until = new DateTime(sprintf('%04d-%02d-%02d 00:00:00', $end[0], $end[1], $end[2]), $tz);
+    return ['from'=>$from->getTimestamp(), 'until'=>$until->getTimestamp()];
+}
+
+function v2raystore_reportJalaliDayBounds($year, $month, $day){
+    $year = intval($year);
+    $month = intval($month);
+    $day = intval($day);
+    if($year < 1200 || $month < 1 || $month > 12 || $day < 1 || $day > 31 || !function_exists('jalali_to_gregorian')) return null;
+    $gregorian = jalali_to_gregorian($year, $month, $day);
+    if(!is_array($gregorian) || count($gregorian) < 3) return null;
+    $tz = new DateTimeZone('Asia/Tehran');
+    $from = new DateTime(sprintf('%04d-%02d-%02d 00:00:00', $gregorian[0], $gregorian[1], $gregorian[2]), $tz);
+    $until = (clone $from)->modify('+1 day');
+    return ['from'=>$from->getTimestamp(), 'until'=>$until->getTimestamp()];
+}
+
+function v2raystore_reportPaymentRows($from, $until){
+    global $connection;
+    $from = intval($from);
+    $until = intval($until);
+    if($from <= 0 || $until <= $from) return [];
+    $productWhere = function_exists('v2raystore_statsProductWhere')
+        ? v2raystore_statsProductWhere()
+        : "(`state` IN ('paid','approved'))";
+    $rows = [];
+    $stmt = @$connection->prepare(
+        "SELECT `price`, `request_date` FROM `pays`
+         WHERE {$productWhere} AND `request_date` >= ? AND `request_date` < ?
+         ORDER BY `request_date` ASC, `id` ASC"
+    );
+    if(!$stmt) return [];
+    $stmt->bind_param('ii', $from, $until);
+    if($stmt->execute()){
+        $result = $stmt->get_result();
+        while($row = $result->fetch_assoc()) $rows[] = [
+            'price'=>intval($row['price'] ?? 0),
+            'request_date'=>intval($row['request_date'] ?? 0)
+        ];
+    }
+    $stmt->close();
+    return $rows;
+}
+
+function v2raystore_reportAvailableJalaliYears(){
+    global $connection;
+    $currentYear = intval(function_exists('jdate') ? jdate('Y', time(), '', 'Asia/Tehran', 'en') : date('Y'));
+    $firstYear = $currentYear;
+    $productWhere = function_exists('v2raystore_statsProductWhere')
+        ? v2raystore_statsProductWhere()
+        : "(`state` IN ('paid','approved'))";
+    $res = @($connection->query("SELECT MIN(`request_date`) AS `first_date` FROM `pays` WHERE {$productWhere}"));
+    if($res){
+        $row = $res->fetch_assoc();
+        $firstTimestamp = intval($row['first_date'] ?? 0);
+        if($firstTimestamp > 0) $firstYear = intval(function_exists('jdate') ? jdate('Y', $firstTimestamp, '', 'Asia/Tehran', 'en') : date('Y', $firstTimestamp));
+    }
+    $years = [];
+    for($year = $currentYear; $year >= $firstYear; $year--) $years[] = $year;
+    return $years;
+}
+
+function v2raystore_reportMonthNames(){
+    return ['فروردین','اردیبهشت','خرداد','تیر','مرداد','شهریور','مهر','آبان','آذر','دی','بهمن','اسفند'];
+}
+
+function v2raystore_reportDayLabel($timestamp){
+    return function_exists('jdate')
+        ? jdate('j F', intval($timestamp), '', 'Asia/Tehran', 'fa')
+        : date('d/m', intval($timestamp));
+}
+
+function v2raystore_sendReportText($text, $eventKey = 'daily_stats'){
+    $chat = v2raystore_getIncomeReportChatId();
+    if($chat === null || $chat === '') return false;
+    $payload = [
+        'chat_id'=>$chat,
+        'text'=>$text,
+        'parse_mode'=>'HTML',
+        '_timeout'=>8
+    ];
+    $threadId = v2raystore_reportEnsureTopic($eventKey);
+    if($threadId > 0) $payload['message_thread_id'] = $threadId;
+    $res = bot('sendMessage', $payload);
+    return function_exists('v2raystore_telegramResponseOk')
+        ? v2raystore_telegramResponseOk($res)
+        : (is_object($res) ? !empty($res->ok) : (is_array($res) ? !empty($res['ok']) : false));
+}
+
+function v2raystore_sendMonthlyIncomeSummary($year, $month){
+    $bounds = v2raystore_reportJalaliMonthBounds($year, $month);
+    if(!$bounds) return false;
+    $rows = v2raystore_reportPaymentRows($bounds['from'], min($bounds['until'], time()));
+    $days = [];
+    $monthTotal = 0;
+    foreach($rows as $row){
+        $timestamp = intval($row['request_date'] ?? 0);
+        if($timestamp <= 0) continue;
+        $dayKey = function_exists('jdate') ? jdate('Y-m-d', $timestamp, '', 'Asia/Tehran', 'en') : date('Y-m-d', $timestamp);
+        if(!isset($days[$dayKey])) $days[$dayKey] = ['label'=>v2raystore_reportDayLabel($timestamp), 'total'=>0, 'count'=>0];
+        $days[$dayKey]['total'] += intval($row['price'] ?? 0);
+        $days[$dayKey]['count']++;
+        $monthTotal += intval($row['price'] ?? 0);
+    }
+    $monthName = v2raystore_reportMonthNames()[$month - 1] ?? ('ماه ' . $month);
+    $text = "📊 <b>گزارش درآمد " . v2raystore_h($monthName) . " " . intval($year) . "</b>\n\n";
+    if(count($days) === 0){
+        $text .= "برای این ماه پرداخت موفقی ثبت نشده است.";
+        return v2raystore_sendReportText($text);
+    }
+    foreach($days as $day){
+        $text .= "📅 <b>" . v2raystore_h($day['label']) . "</b>: <b>" . number_format($day['total']) . " تومان</b> (" . number_format($day['count']) . " پرداخت)\n";
+    }
+    $text .= "\n💰 <b>جمع کل ماه: " . number_format($monthTotal) . " تومان</b>";
+    return v2raystore_sendReportText($text);
+}
+
+function v2raystore_sendDayPaymentDetails($year, $month, $day){
+    $bounds = v2raystore_reportJalaliDayBounds($year, $month, $day);
+    if(!$bounds) return false;
+    $rows = v2raystore_reportPaymentRows($bounds['from'], $bounds['until']);
+    $label = v2raystore_reportDayLabel($bounds['from']);
+    $text = "🧾 <b>ریز تراکنش‌های " . v2raystore_h($label) . "</b>\n\n";
+    if(count($rows) === 0){
+        $text .= "برای این روز پرداخت موفقی ثبت نشده است.";
+        return v2raystore_sendReportText($text);
+    }
+    $total = 0;
+    foreach($rows as $row){
+        $price = intval($row['price'] ?? 0);
+        $total += $price;
+        $text .= number_format($price) . " تومان\n";
+    }
+    $text .= "\n💰 <b>جمع کل پرداخت‌های روز: " . number_format($total) . " تومان</b>";
+    return v2raystore_sendReportText($text);
+}
+
+function v2raystore_reportModeTitle($mode){
+    return $mode === 'day'
+        ? '🧾 انتخاب روز برای ریز تراکنش'
+        : '📊 انتخاب ماه برای گزارش درآمد';
+}
+
+function v2raystore_getMonthlyReportYearsText($mode = 'summary'){
+    return v2raystore_reportModeTitle($mode) . "\n\nسال موردنظر را انتخاب کنید:";
+}
+
+function v2raystore_getMonthlyReportYearsKeys($mode = 'summary'){
+    $rows = [];
+    $yearButtons = [];
+    foreach(v2raystore_reportAvailableJalaliYears() as $year){
+        $yearButtons[] = ['text'=>(string)$year, 'callback_data'=>"monthlyReportYear_{$mode}_{$year}", 'style'=>'primary'];
+        if(count($yearButtons) === 2){
+            $rows[] = $yearButtons;
+            $yearButtons = [];
+        }
+    }
+    if(count($yearButtons) > 0) $rows[] = $yearButtons;
+    if(count($rows) === 0) $rows[] = [['text'=>'سال موجود نیست', 'callback_data'=>'monthlyReportMenu_summary']];
+    $rows[] = [['text'=>'⬅️ بازگشت', 'callback_data'=>'reportChannelSettingsMenu', 'style'=>'primary']];
+    return json_encode(['inline_keyboard'=>$rows], JSON_UNESCAPED_UNICODE);
+}
+
+function v2raystore_getMonthlyReportMonthsText($mode, $year){
+    return v2raystore_reportModeTitle($mode) . "\n\nماه موردنظر در سال <b>" . intval($year) . "</b> را انتخاب کنید:";
+}
+
+function v2raystore_getMonthlyReportMonthsKeys($mode, $year){
+    $rows = [];
+    $names = v2raystore_reportMonthNames();
+    for($month = 1; $month <= 12; $month += 3){
+        $row = [];
+        for($index = 0; $index < 3; $index++){
+            $currentMonth = $month + $index;
+            if($currentMonth > 12) break;
+            $row[] = [
+                'text'=>$names[$currentMonth - 1],
+                'callback_data'=>"monthlyReportMonth_{$mode}_" . intval($year) . "_{$currentMonth}",
+                'style'=>'primary'
+            ];
+        }
+        $rows[] = $row;
+    }
+    $rows[] = [['text'=>'⬅️ سال‌ها', 'callback_data'=>"monthlyReportMenu_{$mode}", 'style'=>'primary']];
+    return json_encode(['inline_keyboard'=>$rows], JSON_UNESCAPED_UNICODE);
+}
+
+function v2raystore_getMonthlyReportDaysText($year, $month){
+    $names = v2raystore_reportMonthNames();
+    $monthName = $names[$month - 1] ?? ('ماه ' . $month);
+    return "🧾 <b>انتخاب روزهای " . v2raystore_h($monthName) . " " . intval($year) . "</b>\n\nروزی را انتخاب کنید:";
+}
+
+function v2raystore_getMonthlyReportDaysKeys($year, $month){
+    $bounds = v2raystore_reportJalaliMonthBounds($year, $month);
+    $days = [];
+    if($bounds){
+        foreach(v2raystore_reportPaymentRows($bounds['from'], min($bounds['until'], time())) as $row){
+            $timestamp = intval($row['request_date'] ?? 0);
+            if($timestamp <= 0) continue;
+            $key = function_exists('jdate') ? jdate('Y-m-d', $timestamp, '', 'Asia/Tehran', 'en') : date('Y-m-d', $timestamp);
+            if(!isset($days[$key])) $days[$key] = ['day'=>intval(function_exists('jdate') ? jdate('j', $timestamp, '', 'Asia/Tehran', 'en') : date('d', $timestamp)), 'label'=>v2raystore_reportDayLabel($timestamp)];
+        }
+    }
+    $rows = [];
+    $buttons = [];
+    foreach($days as $day){
+        $buttons[] = ['text'=>$day['label'], 'callback_data'=>"monthlyReportDay_" . intval($year) . "_" . intval($month) . "_" . intval($day['day']), 'style'=>'primary'];
+        if(count($buttons) === 3){
+            $rows[] = $buttons;
+            $buttons = [];
+        }
+    }
+    if(count($buttons) > 0) $rows[] = $buttons;
+    if(count($rows) === 0) $rows[] = [['text'=>'برای این ماه پرداختی ثبت نشده', 'callback_data'=>"monthlyReportMonth_day_" . intval($year) . "_" . intval($month)]];
+    $rows[] = [['text'=>'⬅️ ماه‌ها', 'callback_data'=>"monthlyReportYear_day_" . intval($year), 'style'=>'primary']];
+    return json_encode(['inline_keyboard'=>$rows], JSON_UNESCAPED_UNICODE);
+}
+
 function v2raystore_getReportSettingsMenuText(){
     $dailyState = v2raystore_reportIsEnabled('storeReportDailyState', 'on') ? 'روشن ✅' : 'خاموش ❌';
     $forumState = v2raystore_reportForumEnabled() ? 'فعال ✅' : 'غیرفعال ❌';
@@ -19964,6 +20201,10 @@ function v2raystore_getReportSettingsMenuKeys(){
     ];
     $rows[] = [
         ['text'=>'📤 ارسال آمار الان', 'callback_data'=>'sendDailyChannelStatsNow', 'style'=>'success']
+    ];
+    $rows[] = [
+        ['text'=>'📊 گزارش درآمد ماهانه', 'callback_data'=>'monthlyReportMenu_summary', 'style'=>'success'],
+        ['text'=>'🧾 ریز تراکنش روزانه', 'callback_data'=>'monthlyReportMenu_day', 'style'=>'primary']
     ];
 
     $rows[] = [[ 'text'=>'🗄 تنظیمات بکاپ دیتابیس', 'callback_data'=>'reportBackupSettingsMenu', 'style'=>'primary' ]];
